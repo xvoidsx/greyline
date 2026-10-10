@@ -1,19 +1,25 @@
-// audio engine — rodio 0.22 Player + ffmpeg PCM pipe for radio streams
+// audio engine — unified ffmpeg PCM pipeline for streams AND local files
+// samples are tapped to a shared ring buffer for the FFT visualizer
 
 use anyhow::{Context, Result};
-use rodio::{buffer::SamplesBuffer, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use rodio::{buffer::SamplesBuffer, DeviceSinkBuilder, MixerDeviceSink, Player};
+use std::collections::VecDeque;
+use std::io::Read;
 use std::num::{NonZeroU16, NonZeroU32};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+/// Shared ring buffer of recent mono samples for the visualizer.
+/// Written by the ffmpeg pump thread, read by the UI thread.
+pub type SampleBuffer = Arc<Mutex<VecDeque<f32>>>;
 
 pub struct GreyPlayer {
     _sink: MixerDeviceSink,
     player: Arc<Player>,
     pub now_playing: Option<String>,
-    // keep the ffmpeg child alive while streaming
-    _stream_child: Option<std::process::Child>,
+    pub samples: SampleBuffer,
+    // keep the ffmpeg child alive while playing
+    _ffmpeg_child: Option<std::process::Child>,
 }
 
 impl GreyPlayer {
@@ -24,50 +30,67 @@ impl GreyPlayer {
             _sink: sink,
             player,
             now_playing: None,
-            _stream_child: None,
+            samples: Arc::new(Mutex::new(VecDeque::with_capacity(8192))),
+            _ffmpeg_child: None,
         })
     }
 
-    fn clear_stream(&mut self) {
-        if let Some(mut child) = self._stream_child.take() {
+    fn clear_playback(&mut self) {
+        if let Some(mut child) = self._ffmpeg_child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.player.clear();
+        if let Ok(mut buf) = self.samples.lock() {
+            buf.clear();
+        }
     }
 
-    /// Play an internet radio stream URL via ffmpeg -> PCM pipe.
-    pub fn play_stream(&mut self, url: &str, label: &str) -> Result<()> {
-        self.clear_stream();
+    /// Spawn ffmpeg decoding `input` (URL or file path) to PCM,
+    /// pump it to the player, and tap samples for the visualizer.
+    fn play_ffmpeg(&mut self, input: &str, label: &str) -> Result<()> {
+        self.clear_playback();
 
         let mut child = Command::new("ffmpeg")
             .args([
-                "-v", "quiet", "-i", url,
-                "-f", "s16le", "-ac", "2", "-ar", "44100",
+                "-v", "quiet", "-i", input,
+                "-f", "s16le", "-ac", "1", "-ar", "44100", // mono for FFT
                 "-",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .context("ffmpeg not found — needed for radio streams")?;
+            .context("ffmpeg not found")?;
 
         let mut stdout = child.stdout.take().context("no ffmpeg stdout")?;
 
-        // pump PCM chunks into the player on a background thread
         let player = Arc::clone(&self.player);
+        let samples = Arc::clone(&self.samples);
+
         std::thread::spawn(move || {
-            let mut buf = [0u8; 16384]; // 4096 stereo samples
+            let mut buf = [0u8; 8192]; // 4096 mono samples
             loop {
                 match stdout.read_exact(&mut buf) {
                     Ok(()) => {
-                        let samples: Vec<f32> = buf
+                        let pcm: Vec<f32> = buf
                             .chunks_exact(2)
                             .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
                             .collect();
+
+                        // tap for visualizer (keep last 8192)
+                        if let Ok(mut ring) = samples.lock() {
+                            ring.extend(pcm.iter().copied());
+                            while ring.len() > 8192 {
+                                ring.pop_front();
+                            }
+                        }
+
+                        // stereo-expand for playback (mono -> stereo)
+                        let stereo: Vec<f32> = pcm.iter().flat_map(|&s| [s, s]).collect();
                         let source = SamplesBuffer::new(
                             NonZeroU16::new(2).unwrap(),
                             NonZeroU32::new(44100).unwrap(),
-                            samples,
+                            stereo,
                         );
                         player.append(source);
                     }
@@ -76,25 +99,25 @@ impl GreyPlayer {
             }
         });
 
-        self._stream_child = Some(child);
-        self.player.play(); // ensure we're not stuck paused from before
+        self._ffmpeg_child = Some(child);
+        self.player.play();
         self.now_playing = Some(label.to_string());
         Ok(())
     }
 
-    /// Play a local audio file.
+    /// Play an internet radio stream URL.
+    pub fn play_stream(&mut self, url: &str, label: &str) -> Result<()> {
+        self.play_ffmpeg(url, label)
+    }
+
+    /// Play a local audio file (via ffmpeg — unified pipeline).
     pub fn play_file(&mut self, path: &std::path::Path) -> Result<()> {
-        self.clear_stream();
-        let file = File::open(path).context("could not open file")?;
-        let source = Decoder::new(BufReader::new(file)).context("could not decode file")?;
-        self.player.append(source);
-        self.player.play();
-        self.now_playing = Some(
-            path.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
-        );
-        Ok(())
+        let path_str = path.to_string_lossy().to_string();
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.play_ffmpeg(&path_str, &label)
     }
 
     pub fn toggle_pause(&self) {
@@ -106,16 +129,12 @@ impl GreyPlayer {
     }
 
     pub fn stop(&mut self) {
-        self.clear_stream();
+        self.clear_playback();
         self.now_playing = None;
     }
 
     pub fn set_volume(&self, v: f32) {
         self.player.set_volume(v.clamp(0.0, 1.0));
-    }
-
-    pub fn volume(&self) -> f32 {
-        self.player.volume()
     }
 
     pub fn is_paused(&self) -> bool {

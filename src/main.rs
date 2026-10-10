@@ -5,6 +5,7 @@ mod music;
 mod player;
 mod radio;
 mod rain;
+mod viz;
 
 use anyhow::Result;
 use crossterm::{
@@ -270,8 +271,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         }
                     }
                     KeyCode::Char('v') => {
-                        app.viz_mode = (app.viz_mode + 1) % 4;
-                        let names = ["off", "bars", "wave", "dots"];
+                        app.viz_mode = (app.viz_mode + 1) % 6;
+                        let names = ["off", "bars", "wave", "space", "robots", "void"];
                         app.status = format!("visualizer: {}", names[app.viz_mode]);
                     }
                     KeyCode::Tab => {
@@ -408,24 +409,34 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
     let playing = app.player.is_playing() && !app.player.is_paused();
     let width = area.width as usize;
     let height = area.height as usize;
-    let tick = app.viz_tick;
+
+    // real FFT data when playing, flat when paused
+    let bars = if playing {
+        viz::fft_bars(&app.player.samples, width)
+    } else {
+        vec![0.0; width]
+    };
+    // overall energy (0..1) for beat-reactive modes
+    let energy: f32 = if bars.is_empty() {
+        0.0
+    } else {
+        bars.iter().sum::<f32>() / bars.len() as f32
+    };
+    // bass level (first quarter of bars) for beat detection
+    let bass: f32 = {
+        let n = (bars.len() / 4).max(1);
+        bars.iter().take(n).sum::<f32>() / n as f32
+    };
 
     let mut lines = Vec::new();
     for row in 0..height {
         let line: String = (0..width)
             .map(|x| {
-                if !playing {
-                    return ' ';
-                }
-                // layered sines create organic motion, -1.0..1.0
-                let t = tick as f32 * 0.12;
-                let wave = (t + x as f32 * 0.15 + row as f32 * 0.5).sin() * 0.5
-                    + (t * 1.3 + x as f32 * 0.07).sin() * 0.3
-                    + (t * 0.7 + row as f32 * 0.3).sin() * 0.2;
+                let level = bars.get(x).copied().unwrap_or(0.0);
                 match app.viz_mode {
                     1 => {
-                        // bars grow from the bottom: bar height 0..height
-                        let bar_h = ((wave * 0.5 + 0.5) * height as f32) as usize;
+                        // traditional bars
+                        let bar_h = (level * height as f32) as usize;
                         if row >= height.saturating_sub(bar_h) {
                             '█'
                         } else {
@@ -433,14 +444,110 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
                         }
                     }
                     2 => {
-                        // wave: line where wave crosses row
-                        let y = wave * height as f32 / 2.0 + height as f32 / 2.0;
+                        // spectrum wave
+                        let y = (1.0 - level) * height as f32;
                         if (y as usize) == row { '─' } else { ' ' }
                     }
                     3 => {
-                        // dots: sparse sparkle
-                        if (tick as usize + x * 7 + row * 13) % 11 == 0 && wave > 0.0 {
-                            '･'
+                        // SPACE: twinkling stars, brightness follows the music
+                        // deterministic starfield from position hash
+                        let hash = (x * 73 + row * 137) % 100;
+                        if hash < 12 {
+                            // star here — twinkle phase + audio reactivity
+                            let twinkle = ((app.viz_tick as f32 * 0.1
+                                + (x * row) as f32 * 0.01)
+                                .sin()
+                                * 0.5
+                                + 0.5);
+                            let brightness = twinkle * 0.4 + level * 0.6 + bass * 0.3;
+                            if brightness > 0.75 {
+                                '✦'
+                            } else if brightness > 0.5 {
+                                '*'
+                            } else if brightness > 0.3 {
+                                '•'
+                            } else if brightness > 0.15 {
+                                '·'
+                            } else {
+                                ' '
+                            }
+                        } else {
+                            ' '
+                        }
+                    }
+                    4 => {
+                        // ROBOTS: little dancers, one per 12 columns
+                        let robot_idx = x / 12;
+                        let rx = x % 12;
+                        let n_robots = width / 12;
+                        if n_robots == 0 {
+                            return ' ';
+                        }
+                        // each robot bounces to its own frequency band
+                        let band = (robot_idx * bars.len() / n_robots).min(bars.len() - 1);
+                        let bounce = (bars[band] * 3.0) as usize;
+                        // robot is 5 wide, 3 tall, anchored to bottom
+                        let robot_base = height.saturating_sub(3 + bounce);
+                        if row >= robot_base && row < robot_base + 3 && rx < 5 {
+                            let arm_up = (app.viz_tick / 8 + robot_idx as u64) % 2 == 0;
+                            match (row - robot_base, rx) {
+                                (0, 1) => {
+                                    if arm_up {
+                                        '\\'
+                                    } else {
+                                        '/'
+                                    }
+                                }
+                                (0, 2) => 'o',
+                                (0, 3) => {
+                                    if arm_up {
+                                        '/'
+                                    } else {
+                                        '\\'
+                                    }
+                                }
+                                (1, 0) => {
+                                    if arm_up {
+                                        '/'
+                                    } else {
+                                        ' '
+                                    }
+                                }
+                                (1, 1) => '|',
+                                (1, 2) => '_',
+                                (1, 3) => '|',
+                                (1, 4) => {
+                                    if arm_up {
+                                        '\\'
+                                    } else {
+                                        ' '
+                                    }
+                                }
+                                (2, 1) => '/',
+                                (2, 3) => '\\',
+                                _ => ' ',
+                            }
+                        } else {
+                            ' '
+                        }
+                    }
+                    5 => {
+                        // VOID: pulsing darkness — a black hole that breathes with the bass
+                        let cx = width as f32 / 2.0;
+                        let cy = height as f32 / 2.0;
+                        let dx = (x as f32 - cx) / (width as f32 / 2.0);
+                        let dy = (row as f32 - cy) / (height as f32 / 2.0);
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        // void radius pulses with bass (0.3..0.8)
+                        let radius = 0.3 + bass * 0.5;
+                        // ring at the edge
+                        let ring = (dist - radius).abs();
+                        if dist < radius {
+                            ' ' // the void itself — pure darkness
+                        } else if ring < 0.08 {
+                            '○' // event horizon
+                        } else if ring < 0.15 && playing {
+                            '·' // accretion sparkle
                         } else {
                             ' '
                         }
@@ -449,17 +556,56 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
                 }
             })
             .collect();
+        // per-mode colors
         let color = match app.viz_mode {
             1 => NEON_CYAN,
             2 => NEON_GREEN,
-            3 => NEON_PINK,
+            3 => {
+                // stars: white/cyan/pink by position
+                if (x_hash(row, width) % 3) == 0 {
+                    NEON_PINK
+                } else {
+                    Color::White
+                }
+            }
+            4 => NEON_GREEN,
+            5 => NEON_PINK,
             _ => DIM,
         };
-        lines.push(Line::from(vec![Span::styled(line, Style::default().fg(color))]));
+        // for mode 3 we need per-char colors, so build spans instead
+        if app.viz_mode == 3 {
+            let spans: Vec<Span> = line
+                .chars()
+                .enumerate()
+                .map(|(x, ch)| {
+                    let c = if ch == ' ' {
+                        DIM
+                    } else if (x * 7 + row * 13) % 3 == 0 {
+                        NEON_PINK
+                    } else if (x * 3 + row * 7) % 3 == 0 {
+                        NEON_CYAN
+                    } else {
+                        Color::White
+                    };
+                    Span::styled(ch.to_string(), Style::default().fg(c))
+                })
+                .collect();
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(vec![Span::styled(
+                line,
+                Style::default().fg(color),
+            )]));
+        }
     }
 
     let viz = Paragraph::new(lines);
     f.render_widget(viz, area);
+}
+
+/// deterministic hash for star colors
+fn x_hash(row: usize, width: usize) -> usize {
+    (row * 31 + width * 17) % 100
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
