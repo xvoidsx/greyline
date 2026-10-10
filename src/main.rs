@@ -67,6 +67,9 @@ struct App {
     // search mode
     searching: bool,
     search_input: String,
+    show_help: bool,
+    viz_mode: usize, // 0=off, 1=bars, 2=wave, 3=rain
+    viz_tick: u64,
 }
 
 impl App {
@@ -105,6 +108,9 @@ impl App {
             status: String::new(),
             searching: false,
             search_input: String::new(),
+            show_help: false,
+            viz_mode: 1,
+            viz_tick: 0,
         })
     }
 
@@ -230,13 +236,29 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 }
 
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        if app.show_help {
+                            app.show_help = false;
+                        } else {
+                            break;
+                        }
+                    }
+                    KeyCode::Char('?') => {
+                        app.show_help = !app.show_help;
+                    }
+                    KeyCode::Char('v') => {
+                        app.viz_mode = (app.viz_mode + 1) % 4;
+                        let names = ["off", "bars", "wave", "dots"];
+                        app.status = format!("visualizer: {}", names[app.viz_mode]);
+                    }
                     KeyCode::Tab => {
                         app.tab = match app.tab {
                             Tab::Radio => Tab::Local,
                             Tab::Local => Tab::Radio,
                         };
                     }
+                    KeyCode::Char('1') => app.tab = Tab::Radio,
+                    KeyCode::Char('2') => app.tab = Tab::Local,
                     KeyCode::Char('/') => {
                         if app.tab == Tab::Radio {
                             app.searching = true;
@@ -268,11 +290,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 
 fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    let buf = f.buffer_mut();
 
-    // clear + rain background (translucent — rain shows through gaps)
-    buf.merge(&Buffer::empty(area));
-    app.rain.tick(area, buf);
+    // clear first
+    {
+        let buf = f.buffer_mut();
+        buf.merge(&Buffer::empty(area));
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -280,11 +303,31 @@ fn ui(f: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3), // header
             Constraint::Min(8),    // list
+            Constraint::Length(3), // visualizer
             Constraint::Length(5), // now playing + help
         ])
         .split(area);
 
-    // header: GREYLINE + tabs
+    // draw UI first, THEN rain on empty cells — rain never touches text
+    draw_header(f, app, chunks[0]);
+    draw_list(f, app, chunks[1]);
+    draw_visualizer(f, app, chunks[2]);
+    draw_bottom(f, app, chunks[3]);
+
+    // rain fills only the gaps (translucent background)
+    {
+        let buf = f.buffer_mut();
+        app.rain.tick(area, buf);
+    }
+    app.viz_tick += 1;
+
+    // help overlay on top of everything
+    if app.show_help {
+        draw_help(f, area);
+    }
+}
+
+fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let tab_style = |active: bool| {
         if active {
             Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD)
@@ -295,14 +338,15 @@ fn ui(f: &mut Frame, app: &mut App) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("G R E Y L I N E", Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
-        Span::styled("[radio]", tab_style(app.tab == Tab::Radio)),
+        Span::styled("[1:radio]", tab_style(app.tab == Tab::Radio)),
         Span::raw(" "),
-        Span::styled("[local]", tab_style(app.tab == Tab::Local)),
-        Span::styled("  (tab to switch)", Style::default().fg(DIM)),
+        Span::styled("[2:local]", tab_style(app.tab == Tab::Local)),
+        Span::styled("  (? for help)", Style::default().fg(DIM)),
     ]));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, area);
+}
 
-    // main list
+fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let (items, state, title) = match app.tab {
         Tab::Radio => {
             let items: Vec<ListItem> = app
@@ -351,9 +395,74 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    f.render_stateful_widget(list, chunks[1], state);
+    f.render_stateful_widget(list, area, state);
+}
 
-    // now playing + help
+fn draw_visualizer(f: &mut Frame, app: &App, area: Rect) {
+    if app.viz_mode == 0 || area.width < 10 {
+        return;
+    }
+
+    let playing = app.player.is_playing() && !app.player.is_paused();
+    let width = area.width as usize;
+    let tick = app.viz_tick;
+
+    // decorative bars — real FFT lands in v0.2
+    // when paused, bars settle flat
+    let bars: Vec<usize> = (0..width)
+        .map(|x| {
+            if !playing {
+                return 0;
+            }
+            let t = tick as f32 * 0.15;
+            let wave = (t + x as f32 * 0.3).sin() * 0.5
+                + (t * 1.7 + x as f32 * 0.13).sin() * 0.3
+                + (t * 0.6 + x as f32 * 0.05).sin() * 0.2;
+            ((wave * 0.5 + 0.5) * 2.0) as usize // 0..2 height
+        })
+        .collect();
+
+    let glyphs = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let line: String = match app.viz_mode {
+        1 => bars
+            .iter()
+            .map(|&h| glyphs[h.min(2) * 4]) // bars: use 0, 4, 8
+            .collect(),
+        2 => (0..width)
+            .map(|x| {
+                if !playing {
+                    return '─';
+                }
+                let t = tick as f32 * 0.2;
+                let y = (t + x as f32 * 0.2).sin();
+                if y > 0.5 {
+                    '╰'
+                } else if y < -0.5 {
+                    '╭'
+                } else {
+                    '─'
+                }
+            })
+            .collect(),
+        3 => (0..width)
+            .map(|x| {
+                if !playing || (tick as usize + x * 3) % 7 != 0 {
+                    return ' ';
+                }
+                '･'
+            })
+            .collect(),
+        _ => return,
+    };
+
+    let viz = Paragraph::new(Line::from(vec![Span::styled(
+        line,
+        Style::default().fg(NEON_CYAN),
+    )]));
+    f.render_widget(viz, area);
+}
+
+fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
     let np = if let Some(name) = &app.player.now_playing {
         let state = if app.player.is_paused() { "paused" } else { "playing" };
         format!("{state}: {name}")
@@ -364,7 +473,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let status = if app.searching {
         format!("search stations: {}_", app.search_input)
     } else if app.status.is_empty() {
-        "j/k move · enter play · space pause · s stop · / search · +/- volume · q quit".to_string()
+        "j/k move · enter play · space pause · s stop · / search · ? help · q quit".to_string()
     } else {
         app.status.clone()
     };
@@ -377,5 +486,48 @@ fn ui(f: &mut Frame, app: &mut App) {
         ]),
         Line::from(vec![Span::styled(status, Style::default().fg(DIM))]),
     ]);
-    f.render_widget(bottom, chunks[2]);
+    f.render_widget(bottom, area);
+}
+
+fn draw_help(f: &mut Frame, area: Rect) {
+    let help_text = vec![
+        Line::from(vec![Span::styled("greyline help", Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD))]),
+        Line::from(""),
+        Line::from(vec![Span::styled("j/k or arrows", Style::default().fg(NEON_CYAN)), Span::raw("  move selection")]),
+        Line::from(vec![Span::styled("enter", Style::default().fg(NEON_CYAN)), Span::raw("         play selected")]),
+        Line::from(vec![Span::styled("space", Style::default().fg(NEON_CYAN)), Span::raw("         pause/resume")]),
+        Line::from(vec![Span::styled("s", Style::default().fg(NEON_CYAN)), Span::raw("             stop")]),
+        Line::from(vec![Span::styled("tab / 1 / 2", Style::default().fg(NEON_CYAN)), Span::raw("   switch radio/local")]),
+        Line::from(vec![Span::styled("/", Style::default().fg(NEON_CYAN)), Span::raw("             search stations (radio tab)")]),
+        Line::from(vec![Span::styled("+ / -", Style::default().fg(NEON_CYAN)), Span::raw("         volume up/down")]),
+        Line::from(vec![Span::styled("?", Style::default().fg(NEON_CYAN)), Span::raw("             this help")]),
+        Line::from(vec![Span::styled("q / esc", Style::default().fg(NEON_CYAN)), Span::raw("       quit")]),
+        Line::from(""),
+        Line::from(vec![Span::styled("press ? or esc to close", Style::default().fg(DIM))]),
+    ];
+
+    let width = 40;
+    let height = help_text.len() as u16 + 2;
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(height) / 2;
+    let help_area = Rect::new(x, y, width.min(area.width), height.min(area.height));
+
+    // clear behind help
+    let buf = f.buffer_mut();
+    for hy in help_area.y..help_area.y + help_area.height {
+        for hx in help_area.x..help_area.x + help_area.width {
+            let cell = &mut buf[(hx, hy)];
+            cell.set_char(' ');
+            cell.set_style(Style::default().bg(Color::Rgb(10, 10, 15)));
+        }
+    }
+
+    let help = Paragraph::new(help_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(NEON_PINK)),
+        );
+    f.render_widget(help, help_area);
 }
