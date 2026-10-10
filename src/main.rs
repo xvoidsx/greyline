@@ -329,6 +329,13 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_list_view(f: &mut Frame, app: &mut App, area: Rect) {
+    // rain FIRST on the cleared buffer, then UI draws over it.
+    // UI text (including its spaces) overwrites rain; gaps keep it.
+    {
+        let buf = f.buffer_mut();
+        app.rain.tick(area, buf);
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
@@ -339,20 +346,20 @@ fn draw_list_view(f: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    // draw UI first, THEN rain on empty cells — rain never touches text
     draw_header(f, app, chunks[0]);
     draw_list(f, app, chunks[1]);
     draw_bottom(f, app, chunks[2]);
 
-    // rain fills only the gaps (translucent background)
-    {
-        let buf = f.buffer_mut();
-        app.rain.tick(area, buf);
-    }
     app.viz_tick += 1;
 }
 
 fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
+    // rain first, UI over it (same as list view)
+    {
+        let buf = f.buffer_mut();
+        app.rain.tick(area, buf);
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(4)
@@ -389,11 +396,6 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
     .alignment(ratatui::layout::Alignment::Center);
     f.render_widget(controls, chunks[2]);
 
-    // rain in the background
-    {
-        let buf = f.buffer_mut();
-        app.rain.tick(area, buf);
-    }
     app.viz_tick += 1;
 }
 
