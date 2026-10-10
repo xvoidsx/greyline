@@ -271,8 +271,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                         }
                     }
                     KeyCode::Char('v') => {
-                        app.viz_mode = (app.viz_mode + 1) % 6;
-                        let names = ["off", "bars", "wave", "space", "robots", "void"];
+                        app.viz_mode = (app.viz_mode + 1) % 8;
+                        let names = ["off", "bars", "wave", "space", "robots", "void", "flame", "matrix"];
                         app.status = format!("visualizer: {}", names[app.viz_mode]);
                     }
                     KeyCode::Tab => {
@@ -552,6 +552,54 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
                             ' '
                         }
                     }
+                    6 => {
+                        // FLAME: doom-fire — heat rises from the spectrum
+                        // simplified: per-column flame height from FFT
+                        let bar_h = (level * height as f32) as usize;
+                        let row_from_bottom = height.saturating_sub(row + 1);
+                        if row_from_bottom < bar_h {
+                            // flame body: color by height (yellow core, red tips)
+                            let heat = 1.0 - (row_from_bottom as f32 / bar_h.max(1) as f32);
+                            // flicker
+                            let flick = ((app.viz_tick as f32 * 0.3 + x as f32 * 0.7).sin() * 0.5 + 0.5) * 0.3;
+                            let h = (heat + flick * heat).min(1.0);
+                            if h > 0.7 {
+                                '█'
+                            } else if h > 0.4 {
+                                '▓'
+                            } else if h > 0.2 {
+                                '▒'
+                            } else {
+                                '░'
+                            }
+                        } else {
+                            ' '
+                        }
+                    }
+                    7 => {
+                        // MATRIX: audio-reactive falling katakana
+                        // columns fall faster and brighter with the music
+                        let col_level = bars.get((x * bars.len() / width).min(bars.len() - 1)).copied().unwrap_or(0.0);
+                        let speed = 1.0 + col_level * 3.0;
+                        let pos = ((app.viz_tick as f32 * speed + x as f32 * 13.0) % (height as f32 * 2.0)) as usize;
+                        let trail = 4;
+                        if row < pos && row >= pos.saturating_sub(trail) {
+                            let depth = (pos - row) as f32 / trail as f32;
+                            // katakana char (deterministic by position)
+                            let kana_code = 0x30A0 + ((x * 7 + row * 13 + app.viz_tick as usize) % 96) as u32;
+                            let ch = char::from_u32(kana_code).unwrap_or('ア');
+                            // brightness by depth and audio level
+                            if depth < 0.25 && col_level > 0.3 {
+                                ch // head glows (will be colored bright)
+                            } else if depth < 0.7 {
+                                ch
+                            } else {
+                                ' '
+                            }
+                        } else {
+                            ' '
+                        }
+                    }
                     _ => ' ',
                 }
             })
@@ -560,16 +608,21 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
         let color = match app.viz_mode {
             1 => NEON_CYAN,
             2 => NEON_GREEN,
-            3 => {
-                // stars: white/cyan/pink by position
-                if (x_hash(row, width) % 3) == 0 {
-                    NEON_PINK
-                } else {
-                    Color::White
-                }
-            }
+            3 => Color::White, // handled per-char below
             4 => NEON_GREEN,
             5 => NEON_PINK,
+            6 => {
+                // flame: yellow core, red/orange tips — approximate by row
+                let heat = 1.0 - (row as f32 / height as f32);
+                if heat > 0.6 {
+                    Color::Rgb(255, 200, 50) // yellow
+                } else if heat > 0.3 {
+                    Color::Rgb(255, 100, 30) // orange
+                } else {
+                    Color::Rgb(200, 40, 20) // red
+                }
+            }
+            7 => NEON_GREEN,
             _ => DIM,
         };
         // for mode 3 we need per-char colors, so build spans instead
