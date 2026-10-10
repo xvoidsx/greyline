@@ -2,15 +2,34 @@
 
 use std::path::PathBuf;
 
-const EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "wav", "m4a", "opus"];
+const EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "ogg", "oga", "wav", "m4a", "aac", "opus", "wma", "aiff", "aif",
+];
 
 pub fn scan_music_dir() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let Some(music) = dirs::audio_dir() else {
-        return out;
-    };
-    scan_dir(&music, &mut out);
+
+    // try XDG music dir, then $HOME/Music, then $HOME/music
+    let mut candidates = Vec::new();
+    if let Some(dir) = dirs::audio_dir() {
+        candidates.push(dir);
+    }
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Music"));
+        candidates.push(home.join("music"));
+    }
+
+    for dir in candidates {
+        if dir.is_dir() {
+            scan_dir(&dir, &mut out);
+            if !out.is_empty() {
+                break; // found music, stop looking
+            }
+        }
+    }
+
     out.sort();
+    out.dedup();
     out
 }
 

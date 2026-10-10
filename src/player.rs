@@ -77,6 +77,7 @@ impl GreyPlayer {
         });
 
         self._stream_child = Some(child);
+        self.player.play(); // ensure we're not stuck paused from before
         self.now_playing = Some(label.to_string());
         Ok(())
     }

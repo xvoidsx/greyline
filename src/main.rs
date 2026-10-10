@@ -21,7 +21,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, BorderType, Clear, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 use std::io;
@@ -54,6 +54,12 @@ enum Tab {
     Local,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    List,
+    NowPlaying,
+}
+
 struct App {
     tab: Tab,
     stations: Vec<Station>,
@@ -68,8 +74,9 @@ struct App {
     searching: bool,
     search_input: String,
     show_help: bool,
-    viz_mode: usize, // 0=off, 1=bars, 2=wave, 3=rain
+    viz_mode: usize, // 0=off, 1=bars, 2=wave, 3=dots
     viz_tick: u64,
+    view: View,
 }
 
 impl App {
@@ -111,6 +118,7 @@ impl App {
             show_help: false,
             viz_mode: 1,
             viz_tick: 0,
+            view: View::List,
         })
     }
 
@@ -236,15 +244,30 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                 }
 
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Esc => {
                         if app.show_help {
                             app.show_help = false;
+                        } else if app.view == View::NowPlaying {
+                            app.view = View::List;
+                        } else if app.searching {
+                            app.searching = false;
+                            app.search_input.clear();
                         } else {
                             break;
                         }
                     }
                     KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
+                    }
+                    KeyCode::Enter => {
+                        if app.view == View::List {
+                            app.play_selected();
+                            // jump to now-playing view on successful play
+                            if app.player.is_playing() {
+                                app.view = View::NowPlaying;
+                            }
+                        }
                     }
                     KeyCode::Char('v') => {
                         app.viz_mode = (app.viz_mode + 1) % 4;
@@ -267,7 +290,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
                     }
                     KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                     KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                    KeyCode::Enter => app.play_selected(),
                     KeyCode::Char(' ') => {
                         app.player.toggle_pause();
                     }
@@ -291,19 +313,28 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> 
 fn ui(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // clear first
-    {
-        let buf = f.buffer_mut();
-        buf.merge(&Buffer::empty(area));
+    // Clear widget properly resets the buffer — merge(Buffer::empty)
+    // does NOT clear (it skips empty cells)
+    f.render_widget(Clear, area);
+
+    match app.view {
+        View::List => draw_list_view(f, app, area),
+        View::NowPlaying => draw_now_playing(f, app, area),
     }
 
+    // help overlay on top of everything
+    if app.show_help {
+        draw_help(f, area);
+    }
+}
+
+fn draw_list_view(f: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
         .constraints([
             Constraint::Length(3), // header
             Constraint::Min(8),    // list
-            Constraint::Length(3), // visualizer
             Constraint::Length(5), // now playing + help
         ])
         .split(area);
@@ -311,8 +342,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // draw UI first, THEN rain on empty cells — rain never touches text
     draw_header(f, app, chunks[0]);
     draw_list(f, app, chunks[1]);
-    draw_visualizer(f, app, chunks[2]);
-    draw_bottom(f, app, chunks[3]);
+    draw_bottom(f, app, chunks[2]);
 
     // rain fills only the gaps (translucent background)
     {
@@ -320,11 +350,108 @@ fn ui(f: &mut Frame, app: &mut App) {
         app.rain.tick(area, buf);
     }
     app.viz_tick += 1;
+}
 
-    // help overlay on top of everything
-    if app.show_help {
-        draw_help(f, area);
+fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(4)
+        .constraints([
+            Constraint::Length(3), // title
+            Constraint::Min(6),    // big visualizer
+            Constraint::Length(3), // controls
+        ])
+        .split(area);
+
+    // station/file name, big and pink
+    let name = app.player.now_playing.clone().unwrap_or_default();
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        name,
+        Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(title, chunks[0]);
+
+    // big visualizer
+    draw_big_visualizer(f, app, chunks[1]);
+
+    // controls
+    let controls = Paragraph::new(Line::from(vec![
+        Span::styled("space", Style::default().fg(NEON_CYAN)),
+        Span::raw(" pause · "),
+        Span::styled("esc", Style::default().fg(NEON_CYAN)),
+        Span::raw(" back · "),
+        Span::styled("v", Style::default().fg(NEON_CYAN)),
+        Span::raw(" visualizer · "),
+        Span::styled("q", Style::default().fg(NEON_CYAN)),
+        Span::raw(" quit"),
+    ]))
+    .alignment(ratatui::layout::Alignment::Center);
+    f.render_widget(controls, chunks[2]);
+
+    // rain in the background
+    {
+        let buf = f.buffer_mut();
+        app.rain.tick(area, buf);
     }
+    app.viz_tick += 1;
+}
+
+fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
+    if area.width < 10 || area.height < 3 {
+        return;
+    }
+    let playing = app.player.is_playing() && !app.player.is_paused();
+    let width = area.width as usize;
+    let height = area.height as usize;
+    let tick = app.viz_tick;
+
+    let mut lines = Vec::new();
+    for row in 0..height {
+        let line: String = (0..width)
+            .map(|x| {
+                if !playing {
+                    return ' ';
+                }
+                // layered sines create organic motion
+                let t = tick as f32 * 0.12;
+                let wave = (t + x as f32 * 0.15 + row as f32 * 0.5).sin() * 0.5
+                    + (t * 1.3 + x as f32 * 0.07).sin() * 0.3
+                    + (t * 0.7 + row as f32 * 0.3).sin() * 0.2;
+                let threshold = (row as f32 / height as f32) * 2.0 - 1.0;
+                match app.viz_mode {
+                    1 => {
+                        // bars: filled if wave exceeds row threshold
+                        if wave > threshold { '█' } else { ' ' }
+                    }
+                    2 => {
+                        // wave: line where wave crosses row
+                        let y = wave * height as f32 / 2.0 + height as f32 / 2.0;
+                        if (y as usize) == row { '─' } else { ' ' }
+                    }
+                    3 => {
+                        // dots: sparse sparkle
+                        if (tick as usize + x * 7 + row * 13) % 11 == 0 && wave > 0.0 {
+                            '･'
+                        } else {
+                            ' '
+                        }
+                    }
+                    _ => ' ',
+                }
+            })
+            .collect();
+        let color = match app.viz_mode {
+            1 => NEON_CYAN,
+            2 => NEON_GREEN,
+            3 => NEON_PINK,
+            _ => DIM,
+        };
+        lines.push(Line::from(vec![Span::styled(line, Style::default().fg(color))]));
+    }
+
+    let viz = Paragraph::new(lines);
+    f.render_widget(viz, area);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -396,70 +523,6 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("> ");
     f.render_stateful_widget(list, area, state);
-}
-
-fn draw_visualizer(f: &mut Frame, app: &App, area: Rect) {
-    if app.viz_mode == 0 || area.width < 10 {
-        return;
-    }
-
-    let playing = app.player.is_playing() && !app.player.is_paused();
-    let width = area.width as usize;
-    let tick = app.viz_tick;
-
-    // decorative bars — real FFT lands in v0.2
-    // when paused, bars settle flat
-    let bars: Vec<usize> = (0..width)
-        .map(|x| {
-            if !playing {
-                return 0;
-            }
-            let t = tick as f32 * 0.15;
-            let wave = (t + x as f32 * 0.3).sin() * 0.5
-                + (t * 1.7 + x as f32 * 0.13).sin() * 0.3
-                + (t * 0.6 + x as f32 * 0.05).sin() * 0.2;
-            ((wave * 0.5 + 0.5) * 2.0) as usize // 0..2 height
-        })
-        .collect();
-
-    let glyphs = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-    let line: String = match app.viz_mode {
-        1 => bars
-            .iter()
-            .map(|&h| glyphs[h.min(2) * 4]) // bars: use 0, 4, 8
-            .collect(),
-        2 => (0..width)
-            .map(|x| {
-                if !playing {
-                    return '─';
-                }
-                let t = tick as f32 * 0.2;
-                let y = (t + x as f32 * 0.2).sin();
-                if y > 0.5 {
-                    '╰'
-                } else if y < -0.5 {
-                    '╭'
-                } else {
-                    '─'
-                }
-            })
-            .collect(),
-        3 => (0..width)
-            .map(|x| {
-                if !playing || (tick as usize + x * 3) % 7 != 0 {
-                    return ' ';
-                }
-                '･'
-            })
-            .collect(),
-        _ => return,
-    };
-
-    let viz = Paragraph::new(Line::from(vec![Span::styled(
-        line,
-        Style::default().fg(NEON_CYAN),
-    )]));
-    f.render_widget(viz, area);
 }
 
 fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
