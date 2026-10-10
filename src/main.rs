@@ -329,12 +329,11 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_list_view(f: &mut Frame, app: &mut App, area: Rect) {
-    // rain FIRST on the cleared buffer, then UI draws over it.
-    // UI text (including its spaces) overwrites rain; gaps keep it.
-    {
-        let buf = f.buffer_mut();
-        app.rain.tick(area, buf);
-    }
+    // rain DISABLED for debugging — testing if UI stabilizes without it
+    // {
+    //     let buf = f.buffer_mut();
+    //     app.rain.tick(area, buf);
+    // }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -354,11 +353,11 @@ fn draw_list_view(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
-    // rain first, UI over it (same as list view)
-    {
-        let buf = f.buffer_mut();
-        app.rain.tick(area, buf);
-    }
+    // rain DISABLED for debugging
+    // {
+    //     let buf = f.buffer_mut();
+    //     app.rain.tick(area, buf);
+    // }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
