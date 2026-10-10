@@ -377,7 +377,8 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         name,
         Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD),
     )]))
-    .alignment(ratatui::layout::Alignment::Center);
+    .alignment(ratatui::layout::Alignment::Center)
+    .style(Style::default().bg(Color::Rgb(5, 5, 8)));
     f.render_widget(title, chunks[0]);
 
     // big visualizer
@@ -394,7 +395,8 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled("q", Style::default().fg(NEON_CYAN)),
         Span::raw(" quit"),
     ]))
-    .alignment(ratatui::layout::Alignment::Center);
+    .alignment(ratatui::layout::Alignment::Center)
+    .style(Style::default().bg(Color::Rgb(5, 5, 8)));
     f.render_widget(controls, chunks[2]);
 
     app.viz_tick += 1;
@@ -469,6 +471,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(DIM)
         }
     };
+    // solid bg — rain stays in the margins, text stays pristine
     let header = Paragraph::new(Line::from(vec![
         Span::styled("G R E Y L I N E", Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD)),
         Span::raw("   "),
@@ -476,7 +479,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled("[2:local]", tab_style(app.tab == Tab::Local)),
         Span::styled("  (? for help)", Style::default().fg(DIM)),
-    ]));
+    ]))
+    .style(Style::default().bg(Color::Rgb(5, 5, 8)));
     f.render_widget(header, area);
 }
 
@@ -521,7 +525,8 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(NEON_GREEN)),
+                .border_style(Style::default().fg(NEON_GREEN))
+                .style(Style::default().bg(Color::Rgb(5, 5, 8))),
         )
         .highlight_style(
             Style::default()
@@ -555,7 +560,8 @@ fn draw_bottom(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(vol, Style::default().fg(DIM)),
         ]),
         Line::from(vec![Span::styled(status, Style::default().fg(DIM))]),
-    ]);
+    ])
+    .style(Style::default().bg(Color::Rgb(5, 5, 8)));
     f.render_widget(bottom, area);
 }
 
