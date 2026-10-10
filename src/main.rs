@@ -364,9 +364,10 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         .direction(Direction::Vertical)
         .margin(4)
         .constraints([
-            Constraint::Length(3), // title
-            Constraint::Min(6),    // big visualizer
-            Constraint::Length(3), // controls
+            Constraint::Length(3),  // title
+            Constraint::Length(10), // big visualizer (fixed, not Min)
+            Constraint::Length(3),  // controls
+            Constraint::Min(0),     // spacer (absorbs extra height)
         ])
         .split(area);
 
@@ -415,16 +416,20 @@ fn draw_big_visualizer(f: &mut Frame, app: &App, area: Rect) {
                 if !playing {
                     return ' ';
                 }
-                // layered sines create organic motion
+                // layered sines create organic motion, -1.0..1.0
                 let t = tick as f32 * 0.12;
                 let wave = (t + x as f32 * 0.15 + row as f32 * 0.5).sin() * 0.5
                     + (t * 1.3 + x as f32 * 0.07).sin() * 0.3
                     + (t * 0.7 + row as f32 * 0.3).sin() * 0.2;
-                let threshold = (row as f32 / height as f32) * 2.0 - 1.0;
                 match app.viz_mode {
                     1 => {
-                        // bars: filled if wave exceeds row threshold
-                        if wave > threshold { '█' } else { ' ' }
+                        // bars grow from the bottom: bar height 0..height
+                        let bar_h = ((wave * 0.5 + 0.5) * height as f32) as usize;
+                        if row >= height.saturating_sub(bar_h) {
+                            '█'
+                        } else {
+                            ' '
+                        }
                     }
                     2 => {
                         // wave: line where wave crosses row
